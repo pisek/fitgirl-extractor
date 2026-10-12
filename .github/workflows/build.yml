@@ -1,0 +1,64 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to create releases for v* tags
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Unit tests
+        run: zig build test
+
+      - name: Build fitgirl-extractor.exe
+        run: zig build
+
+      - name: Check that the exe is not large-address-aware
+        run: |
+          python3 - <<'EOF'
+          import struct
+          data = open("zig-out/bin/fitgirl-extractor.exe", "rb").read()
+          pe = struct.unpack_from("<I", data, 0x3C)[0]
+          assert data[pe:pe + 4] == b"PE\0\0"
+          assert not struct.unpack_from("<H", data, pe + 22)[0] & 0x20, "exe is LARGE_ADDRESS_AWARE; unarc.dll hangs"
+          EOF
+
+      - name: Package
+        run: |
+          name="fitgirl-extractor-${GITHUB_REF_NAME//\//-}"
+          mkdir -p "dist/$name"
+          cp zig-out/bin/fitgirl-extractor.exe README.md LICENSE "dist/$name/"
+          cp -r zig-out/licenses "dist/$name/licenses"
+          (cd dist && zip -qr "$name.zip" "$name")
+          cp zig-out/bin/fitgirl-extractor.exe dist/
+          (cd dist && sha256sum fitgirl-extractor.exe "$name.zip" > SHA256SUMS)
+          echo "PACKAGE=$name" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: dist/${{ env.PACKAGE }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets="dist/fitgirl-extractor.exe dist/$PACKAGE.zip dist/SHA256SUMS"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" $assets --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" $assets --title "$GITHUB_REF_NAME" --generate-notes
+          fi
