@@ -180,15 +180,26 @@ prepared_tools prepare_tools(const fs::path & tools, const std::vector<std::pair
 	}
 
 	// A CLS-<name>.dll (loaded by unarc.dll) talks to its cls-<name>_x64/_x86.exe helper through named
-	// file mappings. Some pairs disagree on the namespace: the helper creates "Global\Read_MapFile_..."
-	// while the DLL opens "Read_MapFile_...". Wine keeps those apart, so the DLL fails and the helper
-	// hangs. If the DLL has no "Global\" string, blank the helper's one so both use the same name.
+	// file mappings. In Windows, creating objects in the "Global\" namespace requires administrator
+	// privileges (SeCreateGlobalPrivilege), failing with ERROR_ACCESS_DENIED for standard users.
+	// Wine also keeps "Global\" and local namespaces isolated. Blank "Global\" in both the DLL and
+	// the helper so they communicate via the session namespace without requiring elevation.
 	for(const fs::path & dll : files) {
 		std::string name = cls_plugin_name(dll.filename().string());
-		if(name.empty() || contains_global_namespace(read_file(dll))) {
+		if(name.empty()) {
 			continue;
 		}
-		for(const char * suffix : { "_x64.exe", "_x86.exe" }) {
+		std::string dll_data = read_file(dll);
+		std::vector<std::size_t> dll_offsets = blank_global_namespace(dll_data);
+		if(!dll_offsets.empty()) {
+			write_file(dll, dll_data);
+			for(std::size_t offset : dll_offsets) {
+				char hex[32];
+				std::snprintf(hex, sizeof(hex), "0x%zx", offset);
+				log("Patched Global\\ namespace in " + dll.filename().string() + " at " + hex);
+			}
+		}
+		for(const char * suffix : { "_x64.exe", "_x86.exe", ".exe" }) {
 			fs::path helper = find_file(tools, "cls-" + name + suffix);
 			if(helper.empty()) {
 				continue;
@@ -197,11 +208,11 @@ prepared_tools prepare_tools(const fs::path & tools, const std::vector<std::pair
 			std::vector<std::size_t> offsets = blank_global_namespace(data);
 			if(!offsets.empty()) {
 				write_file(helper, data);
-			}
-			for(std::size_t offset : offsets) {
-				char hex[32];
-				std::snprintf(hex, sizeof(hex), "0x%zx", offset);
-				log("Patched Global\\ namespace in " + helper.filename().string() + " at " + hex);
+				for(std::size_t offset : offsets) {
+					char hex[32];
+					std::snprintf(hex, sizeof(hex), "0x%zx", offset);
+					log("Patched Global\\ namespace in " + helper.filename().string() + " at " + hex);
+				}
 			}
 		}
 	}
